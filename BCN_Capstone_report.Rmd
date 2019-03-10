@@ -1,0 +1,636 @@
+---
+title: "Capstone project -- New York City Real Estate"
+author: "Ben Neely"
+date: "March 10, 2019"
+output:
+  pdf_document: default
+  html_document:
+fig_width: 7.5
+fig_height: 6
+---
+
+```{r,include=F}
+if("tidyverse"%in%rownames(installed.packages()) == FALSE){install.packages("tidyverse")}
+library(tidyverse)
+if("caret"%in%rownames(installed.packages()) == FALSE){install.packages("caret")}
+library(caret)
+if("lubridate"%in%rownames(installed.packages()) == FALSE){install.packages("lubridate")}
+library(lubridate)
+if("kableExtra"%in%rownames(installed.packages()) == FALSE){install.packages("kableExtra")}
+library(kableExtra)
+if("scales"%in%rownames(installed.packages()) == FALSE){install.packages("scales")}
+library(scales)
+if("gridExtra"%in%rownames(installed.packages()) == FALSE){install.packages("gridExtra")}
+library(gridExtra)
+if("smatr"%in%rownames(installed.packages()) == FALSE){install.packages("smatr")}
+library(smatr)
+if("tinytex"%in%rownames(installed.packages()) == FALSE){install.packages("tinytex")}
+library(tinytex)
+
+```
+
+###**OVERVIEW**
+Data scientists are often tasked with navigating large data sets to develop predictive models. In the current project, a database consisting of 84,548 property sales in New York City between 1 September 2016 and 31 August 2017 was analyzed. The purpose of this exercise was to develop and evaluate a predictive model consisting of various factors on property price. Specifically, the objective was to develop a predictive algorithm from a training data set (25% of total properties) that minimized root mean squared error (RMSE). Data cleansing and consolidation reduced the raw data set to 54,019 records. Model parameters included borough, number of residential and commercial units, land and gross area, decade built, tax.class, building class, day of week the property was sold, and month the property was sold. When all predictive factors were included in the model, RMSE = 0.331. The model was then applied to the validation data set (75% of total properties) and accuracy was assessed as the percent of predictions within 1 SE of mean property price and the percent of predictions within 2 SE of mean property price. Despite somewhat low RMSE, only 10.5% of predictions were within 1 SE of mean property price and 20.6% were within 2 SE of mean property price. These results suggest that the variables measured herein are suitable for providing an approximation of property price, but additional factors would need to be considered if increased accuracy was the objective.
+
+###**METHODS**
+Data used for this exercise were contained in the [New York City property sales database](https://www.kaggle.com/new-york-city/nyc-property-sales) developed by the City of New York and hosted on [kaggle](https://www.kaggle.com/). The initial step following data import was data cleansing. This primarily consisted of grouping data (e.g., lumping number of residential units per property into categories), converting numeric and character data to factors, and removing unnecessary columns. Residental units were grouped into 0, 1, 2, 3, 4 to 10, 11 to 50, and 51 or greater. Commercial units were grouped into 0, 1, 2, 3, and 4 or greater. Both land area and gross area were grouped into 0 sq ft, 1 to 2,000 sq ft, 2,001 to 4,000 sq ft, and 4,001 sq ft and greater. Decade the property was built was also identified to estimate property age at time of sale. Continuous data were converted to factors to allow compartmentalized algorithm development and application. The following script was used to conduct the above mentioned steps.
+
+```
+nyc=dat%>%
+  select(-id)%>%
+  mutate(borough=as.factor(borough))%>%
+  select(-hood,-bldg.class.cat,-tax.class,-block,-lot,-easement,
+         -bldg.class.prsnt,-address,-apt.num)%>%
+  mutate(zip=as.factor(zip),
+         resunits=ifelse(res.units==0,"0",
+                  ifelse(res.units==1,"1",
+                  ifelse(res.units==2,"2",
+                  ifelse(res.units==3,"3",
+                  ifelse(res.units>=4&res.units<=10,"4:10",
+                  ifelse(res.units>=11&res.units<=50,"11:50",
+                  ifelse(res.units>=51,"51+",NA))))))),
+         resunits=as.factor(resunits),
+         comunits=ifelse(com.units==0,"0",
+                  ifelse(com.units==1,"1",
+                  ifelse(com.units==2,"2",
+                  ifelse(com.units==3,"3",
+                  ifelse(com.units>=4,"4+",NA))))),
+         comunits=as.factor(comunits),
+         rescom=ifelse(res.units>=com.units,"res","com"),
+         rescom=as.factor(rescom))%>%
+  select(-res.units,-com.units,-tot.units)%>%
+  mutate(land.area=as.numeric(land.area),
+         landareacat=ifelse(land.area==0,"0",
+                     ifelse(land.area>0&land.area<=2000,"1:2000",
+                     ifelse(land.area>2000&land.area<=4000,"2001:4000",
+                     ifelse(land.area>4000,"4000+",NA)))),
+         landareacat=as.factor(landareacat),
+         gross.area=as.numeric(gross.area),
+         grossareacat=ifelse(gross.area==0,"0",
+                      ifelse(gross.area>0&gross.area<=2000,"1:2000",
+                      ifelse(gross.area>2000&gross.area<=4000,"2001:4000",
+                      ifelse(gross.area>4000,"4000+",NA)))),
+         grossareacat=as.factor(grossareacat),
+         decade=as.factor(yr.built-(yr.built%%10)),
+         tax.class=as.factor(tax.class.sale),
+         bldg.class=as.character(bldg.class.sale),
+         bldg.class=substr(bldg.class,1,1),
+         bldg.class=as.factor(bldg.class),
+         datetime=as.Date(datetime),
+         day=as.factor(weekdays(datetime)),
+         month=as.factor(month(datetime)))%>%
+  select(-land.area,-gross.area,-yr.built,-tax.class.sale,-bldg.class.sale,-datetime)%>%
+  mutate(price=gsub(" -  ",NA,price),
+         price=as.numeric(price))%>%
+  filter(price>=10000&price<1000000000)%>%
+  drop_na(price)
+```
+
+This routine was followed by a secondary data check that revealed potential problems with the decade each property was built and building codes. Specifically, properties built before 1890 were removed due to small sample size and missing data, and only building codes with greater than 100 records were retained. These data cleansing steps resulted in a tidy set of variables that could be used to predict property sale price.
+
+```
+keeps=c("A","B","C","D","E","F","G","H","K","O","R","S","V")
+
+nycdat=nyc%>%
+  select(-zip)%>%
+  mutate(decade=as.numeric(as.character(decade)))%>%
+  filter(decade>=1890)%>%
+  mutate(decade=as.factor(decade))%>%
+  filter(bldg.class %in% keeps)%>%
+  droplevels()
+```
+
+A cursory view of sales data revealed that minimum property price was \$0 USD and maximum property price was \$2,210,000,000 USD. To mitigate effects of properties that were priced at extreme low or high values, those < \$10,000 USD and those > \$1,000,000,000 USD were removed from analyses. Additionally, properties with no price listed were also removed from analyses.
+
+```{r,echo=F}
+dat=read.csv("https://raw.githubusercontent.com/bencneely/CapstoneNYC/master/nyc-rolling-sales.csv")
+
+names(dat)=c("id","borough","hood","bldg.class.cat","tax.class","block","lot","easement","bldg.class.prsnt",
+             "address","apt.num","zip","res.units","com.units","tot.units","land.area","gross.area","yr.built",
+             "tax.class.sale","bldg.class.sale","price","datetime")
+
+nyc=dat%>%
+  select(-id)%>%
+  mutate(borough=as.factor(borough))%>%
+  select(-hood,-bldg.class.cat,-tax.class,-block,-lot,-easement,-bldg.class.prsnt,-address,-apt.num)%>%
+  mutate(zip=as.factor(zip),
+         resunits=ifelse(res.units==0,"0",
+                  ifelse(res.units==1,"1",
+                  ifelse(res.units==2,"2",
+                  ifelse(res.units==3,"3",
+                  ifelse(res.units>=4&res.units<=10,"4:10",
+                  ifelse(res.units>=11&res.units<=50,"11:50",
+                  ifelse(res.units>=51,"51+",NA))))))),
+         resunits=as.factor(resunits),
+         comunits=ifelse(com.units==0,"0",
+                  ifelse(com.units==1,"1",
+                  ifelse(com.units==2,"2",
+                  ifelse(com.units==3,"3",
+                  ifelse(com.units>=4,"4+",NA))))),
+         comunits=as.factor(comunits),
+         rescom=ifelse(res.units>=com.units,"res","com"),
+         rescom=as.factor(rescom))%>%
+  select(-res.units,-com.units,-tot.units)%>%
+  mutate(land.area=as.numeric(land.area),
+         landareacat=ifelse(land.area==0,"0",
+                     ifelse(land.area>0&land.area<=2000,"1:2000",
+                     ifelse(land.area>2000&land.area<=4000,"2001:4000",
+                     ifelse(land.area>4000,"4000+",NA)))),
+         landareacat=as.factor(landareacat),
+         gross.area=as.numeric(gross.area),
+         grossareacat=ifelse(gross.area==0,"0",
+                      ifelse(gross.area>0&gross.area<=2000,"1:2000",
+                      ifelse(gross.area>2000&gross.area<=4000,"2001:4000",
+                      ifelse(gross.area>4000,"4000+",NA)))),
+         grossareacat=as.factor(grossareacat),
+         decade=as.factor(yr.built-(yr.built%%10)),
+         tax.class=as.factor(tax.class.sale),
+         bldg.class=as.character(bldg.class.sale),
+         bldg.class=substr(bldg.class,1,1),
+         bldg.class=as.factor(bldg.class),
+         datetime=as.Date(datetime),
+         day=as.factor(weekdays(datetime)),
+         month=as.factor(month(datetime)))%>%
+  select(-land.area,-gross.area,-yr.built,-tax.class.sale,-bldg.class.sale,-datetime)%>%
+  mutate(price=gsub(" -  ",NA,price),
+         price=as.numeric(price))%>%
+  filter(price>=10000&price<1000000000)%>%
+  drop_na(price)
+
+## Only retain classes that have more than 100 rows
+keeps=c("A","B","C","D","E","F","G","H","K","O","R","S","V")
+
+nycdat=nyc%>%
+  select(-zip)%>%
+  mutate(decade=as.numeric(as.character(decade)))%>%
+  filter(decade>=1890)%>%
+  mutate(decade=as.factor(decade))%>%
+  filter(bldg.class %in% keeps)%>%
+  droplevels()
+
+## Look at distribution of price
+nycdat%>%
+  ggplot(aes(x=price))+
+  geom_histogram(bins=100)+
+  scale_x_continuous(labels=dollar)+
+  labs(x="Price (USD)",y="Count")+
+  theme_classic()
+```
+
+Despite attempts to standardize sale price data, extreme values still drove the distribution. Price was log10 transformed and the distribution was again examined.
+
+```{r,echo=T}
+nycdat=nycdat%>%
+  mutate(logprice=log10(price))
+nycdat%>%
+  ggplot(aes(x=logprice))+
+  geom_histogram(bins=100)+
+  scale_x_continuous(labels=dollar)+
+  labs(x="Log10 Price $USD",y="Count")+
+  theme_classic()
+```
+
+Following data cleansing and price transformation, predictor variables were examined against property price to examine for cursory strong relationships.
+
+```{r,echo=F}
+## Examine boxplots of price by factor
+(borough_plot=nycdat%>%
+  ggplot(aes(x=borough,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Borough",y="Price"))+
+  theme_classic()
+
+(resunits_plot=nycdat%>%
+  ggplot(aes(x=resunits,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  scale_x_discrete(limits=c("0","1","2","3","4:10","11:50","51+"))+
+  labs(x="Residential Units",y="Price"))+
+  theme_classic()
+  
+(comunits_plot=nycdat%>%
+  ggplot(aes(x=comunits,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Commercial Units",y="Price"))+
+  theme_classic()
+  
+(rescom_plot=nycdat%>%
+  ggplot(aes(x=rescom,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Residential vs Commercial",y="Price"))+
+  theme_classic()
+  
+(landarea_plot=nycdat%>%
+  ggplot(aes(x=landareacat,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Land area (sq ft)",y="Price"))+
+  theme_classic()
+  
+(grossarea_plot=nycdat%>%
+  ggplot(aes(x=grossareacat,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Gross area (sq ft)",y="Price"))+
+  theme_classic()
+
+(decadebuilt_plot=nycdat%>%
+  ggplot(aes(x=decade,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Decade built",y="Price"))+
+  theme_classic()
+  
+(taxclass_plot=nycdat%>%
+  ggplot(aes(x=tax.class,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Tax class",y="Price"))+
+  theme_classic()
+  
+(buildingclass_plot=nycdat%>%
+  ggplot(aes(x=bldg.class,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Building class",y="Price"))+
+  theme_classic()
+  
+(day_plot=nycdat%>%
+  ggplot(aes(x=day,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  scale_x_discrete(limits=c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))+
+  labs(x="Day of week",y="Price"))+
+  theme_classic()
+
+(month_plot=nycdat%>%
+  ggplot(aes(x=month,y=price))+
+  geom_boxplot()+
+  scale_y_log10(labels=dollar)+
+  labs(x="Month",y="Price"))+
+  theme_classic()
+```
+
+Although several factors seemed to have greater influence on purchase price, all were analyzed to maximize explained variablity. The tidy data set to be analyzed had the following form.
+
+```{r,echo=F}
+head(as_tibble(nycdat,n=6))
+```
+
+A training data set was created by randomly extracting 25% of records (n = 13,506) and the remaining 75% of records (n = 40,513) was used as a validation data set for the predictive algorithm. Finally, a function to calculate RMSE was developed to assess algorithm precision. The intital predictive model simply used mean of all property prices as the lone predictor variable. Effects of borough, number of residential units, number of commercial units, property type, land area, gross area, decade built, tax class, building class, day of week the property sold, and month the property sold were iteratively added and RMSE was calculated for each model to measure fit. The best fit model was applied to the validation data set to predict sale price. Accuracy was assessed by calculating the absolute value of the difference between the true sale price and the predicted sale price. Accuracy was measured by the proportion of predictions that were within 1 SE and 2 SE of the mean property price.
+
+##**RESULTS**
+The model that accounted for effects of all variables resulted in the lowest RMSE (0.331). However, RMSE was primarily affected by borough and number of residential units. Additional factors added little predictive capability once borough and number of residential units were considered. Given the objective of this exercise is to minimize RMSE, the model containing all explanatory variables should be used to predict property sales price. 
+
+```{r,echo=F}
+set.seed(1)
+test_index=createDataPartition(y=nycdat$logprice,times=1,p=0.25,list=FALSE)
+
+validation=nycdat[-test_index,]
+train=nycdat[test_index,]
+#################################################################################
+RMSE=function(true_price,predicted_price){
+  sqrt(mean((true_price-predicted_price)^2))
+}
+#################################################################################
+mu_hat=mean(train$logprice)
+
+naive_rmse=RMSE(train$logprice,mu_hat)
+
+rmse_results=tibble(Model="Average model",RMSE=naive_rmse)
+#################################################################################
+mu=mean(train$logprice)
+borough_avgs=train%>%
+  group_by(borough)%>%
+  summarize(b_b=mean(logprice-mu))
+
+predicted_price=mu+train%>%
+  left_join(borough_avgs,by='borough')%>%
+  .$b_b
+
+model_1_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="Borough Effect Model",
+                              RMSE=model_1_rmse))
+#################################################################################
+resunits_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  group_by(resunits)%>%
+  summarize(b_r=mean(logprice-mu-b_b))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  mutate(pred=mu+b_b+b_r)%>%
+  .$pred
+
+model_2_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + Residential Units Effects Model",
+                                  RMSE=model_2_rmse))
+#################################################################################
+comunits_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  group_by(comunits)%>%
+  summarize(b_c=mean(logprice-mu-b_b-b_r))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  mutate(pred=mu+b_b+b_r+b_c)%>%
+  .$pred
+
+model_3_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + Commercial Units Effects Model",
+                                  RMSE=model_3_rmse))
+#################################################################################
+proptype_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  group_by(rescom)%>%
+  summarize(b_pt=mean(logprice-mu-b_b-b_r-b_c))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt)%>%
+  .$pred
+
+model_4_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + Property Type Effects Model",
+                                  RMSE=model_4_rmse))
+#################################################################################
+landarea_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  group_by(landareacat)%>%
+  summarize(b_la=mean(logprice-mu-b_b-b_r-b_c-b_pt))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la)%>%
+  .$pred
+
+model_5_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + Land Area Effects Model",
+                                  RMSE=model_5_rmse))
+#################################################################################
+grossarea_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  group_by(grossareacat)%>%
+  summarize(b_ga=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga)%>%
+  .$pred
+
+model_6_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + Gross Area Effects Model",
+                                  RMSE=model_6_rmse))
+#################################################################################
+decade_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  group_by(decade)%>%
+  summarize(b_d=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la-b_ga))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d)%>%
+  .$pred
+
+model_7_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + GA + Decade Effects Model",
+                                  RMSE=model_7_rmse))
+#################################################################################
+tax_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  group_by(tax.class)%>%
+  summarize(b_t=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la-b_ga-b_d))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d+b_t)%>%
+  .$pred
+
+model_8_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + GA + D + Tax Class Effects Model",
+                                  RMSE=model_8_rmse))
+#################################################################################
+bldgclass_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  group_by(bldg.class)%>%
+  summarize(b_bc=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la-b_ga-b_d-b_t))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d+b_t+b_bc)%>%
+  .$pred
+
+model_9_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + GA + D + TC + Building Class Effects Model",
+                                  RMSE=model_9_rmse))
+#################################################################################
+daysold_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  group_by(day)%>%
+  summarize(b_ds=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la-b_ga-b_d-b_t-b_bc))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  left_join(daysold_avgs,by='day')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d+b_t+b_bc+b_ds)%>%
+  .$pred
+
+model_10_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + GA + D + TC + BC + Day Sold Effects Model",
+                                  RMSE=model_10_rmse))
+#################################################################################
+monthsold_avgs=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  left_join(daysold_avgs,by='day')%>%
+  group_by(month)%>%
+  summarize(b_ms=mean(logprice-mu-b_b-b_r-b_c-b_pt-b_la-b_ga-b_d-b_t-b_bc-b_ds))
+
+predicted_price=train%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  left_join(daysold_avgs,by='day')%>%
+  left_join(monthsold_avgs,by='month')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d+b_t+b_bc+b_ds+b_ms)%>%
+  .$pred
+
+model_11_rmse=RMSE(predicted_price,train$logprice)
+rmse_results=bind_rows(rmse_results,
+                       tibble(Model="B + RU + CU + PT + LA + GA + D + TC + BC + DS + Month Sold Effects Model",
+                                  RMSE=model_11_rmse))
+
+kable(rmse_results)%>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+```
+Accuracy of predicted sales price within 1 SE and 2 SE of mean property sale price were 10.5% and 20.6%, respectively. A linear regression model addressing predicted price relative to true price suggested that slopes differed and predicted price using this algorithm was not a suitable predictor for true sales price.
+
+```{r,echo=F,message=F,warning=F}
+predicted_price=validation%>%
+  left_join(borough_avgs,by='borough')%>%
+  left_join(resunits_avgs,by='resunits')%>%
+  left_join(comunits_avgs,by='comunits')%>%
+  left_join(proptype_avgs,by='rescom')%>%
+  left_join(landarea_avgs,by='landareacat')%>%
+  left_join(grossarea_avgs,by='grossareacat')%>%
+  left_join(decade_avgs,by='decade')%>%
+  left_join(tax_avgs,by='tax.class')%>%
+  left_join(bldgclass_avgs,by='bldg.class')%>%
+  left_join(daysold_avgs,by='day')%>%
+  left_join(monthsold_avgs,by='month')%>%
+  mutate(pred=mu+b_b+b_r+b_c+b_pt+b_la+b_ga+b_d+b_t+b_bc+b_ds+b_ms)%>%
+  .$pred
+
+valcomp=validation%>%
+  mutate(pred_price=predicted_price)%>%
+  select(logprice,pred_price)%>%
+  mutate(diff=abs(10^pred_price-10^logprice),
+         price=10^logprice,
+         pred=10^pred_price)%>%
+  as.data.frame()
+
+mean_price=mean(valcomp$price)
+sd_price=sd(valcomp$price)
+n_price=length(valcomp$price)
+se1_price=sd_price/sqrt(n_price)
+se2_price=2*se1_price
+
+valcomp%>%
+  ggplot(aes(x=10^pred_price,y=10^logprice))+
+  geom_segment(x=log10(80000),y=log10(80000),xend=log10(110000000),yend=log10(110000000),col="red",linetype="dashed",size=2)+
+  geom_point(col=rgb(0,0,0,0.1))+
+  scale_y_log10(limits=c(10000,2200000000),labels=dollar)+
+  scale_x_log10(limits=c(10000,2200000000),labels=dollar)+
+  geom_smooth(method='lm',se=F,col="blue",size=2)+
+  labs(x="Predicted price (USD)",y="Actual price (USD)")+
+  annotate(geom="text",x=50000000,y=90000,label="y = 1.047x - 0.276",col="blue",hjust=0,size=4)+
+  annotate(geom="text",x=50000000,y=54000,label="y = x",col="red",hjust=0,size=4)+
+  annotate(geom="text",x=50000000,y=30000,label="F-Test: p < 0.0001",hjust=0,size=4)+
+  theme_classic()+
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=14,face="bold"))
+```
+
+Further, a histogram of difference between actual and predicted price indicated a mode near \$1,000,000 USD lending further evidence that the developed algorithm did not suitably predict true property sales price.
+
+```{r Difference Histogram,echo=F,message=F,warning=F}
+valcomp%>%
+  ggplot(aes(x=diff))+
+  geom_histogram(bins=100)+
+  scale_x_log10(expand=c(0,0),limits=c(1,1000000000),labels=dollar)+
+  scale_y_continuous(expand=c(0,0),limits=c(0,3000))+
+  labs(x="Difference Actual and Predicted (USD)",y="Frequency")+
+  theme_classic()+
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=14,face="bold"))
+```
+
+##**CONCLUSIONS**
+Data science skills including data organization, data cleansing, algorithm development, and data visualization were used in this exercise to predict property sales price in New York City between 1 September 2016 and 31 August 2017 from a large, publically available data set. Root mean squared error values decreased with inclusion of more explanatory variables. However, simply using borough and residential effects to predict property sale price may have been sufficient. Accuracy with the algorithm presented herein was lower than expected. This could be attributed to many factors, but may be associated with limited predictive power of available data. For example, factors related to subway proximity, available parking, or crime rate, may allow more accurate predictions of property sale value. Although the algorithm presented herein was not effective at prediction of property value, it demonstrates an approach that can be used to assess coarse property value categories. Additional parameters would need to be considered if accurately predicting property sale value was the primary objective.
